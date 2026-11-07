@@ -42,14 +42,44 @@ impl DekuReader<'_, ReadExact> for Vec<u8> {
     }
 }
 
-/// Upper bound, in bytes, on speculative pre-allocation driven by a `count`
-/// read from the input. The `Vec` still grows past this if the elements are
-/// really there; a bogus count fails on the first missing element instead of
-/// requesting `count * size_of::<T>()` up front.
+/// Fallback bound, in bytes, on speculative pre-allocation when the input's
+/// size can't be determined (its `Seek` impl can't report the end).
 const MAX_PREALLOC_BYTES: usize = 64 * 1024;
 
-pub(crate) fn bounded_capacity<T>(count: usize) -> usize {
-    count.min(MAX_PREALLOC_BYTES / mem::size_of::<T>().max(1))
+/// Capacity to pre-allocate for `count` elements read from untrusted input.
+///
+/// Capacity is only a hint: the container still grows if more elements are
+/// really present. Each element normally consumes at least one input byte, so
+/// an honest `count` never exceeds the bytes remaining, and capping there
+/// keeps exact pre-allocation for honest input while stopping a bogus count
+/// from requesting `count * size_of::<T>()` up front. Elements that consume
+/// no input just grow the container normally.
+pub(crate) fn bounded_capacity<T, R: Read + Seek>(
+    reader: &mut Reader<R>,
+    count: usize,
+) -> Result<usize, DekuError> {
+    Ok(match remaining_bytes(reader)? {
+        Some(remaining) => count.min(usize::try_from(remaining).unwrap_or(usize::MAX)),
+        None => count.min(MAX_PREALLOC_BYTES / mem::size_of::<T>().max(1)),
+    })
+}
+
+/// Bytes left in the underlying stream, or `None` if it can't say.
+///
+/// Seeks the inner stream directly: `Reader`'s own `Seek` impl would discard
+/// leftover bits from a partially consumed byte.
+fn remaining_bytes<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Option<u64>, DekuError> {
+    let inner = reader.as_mut();
+    let Ok(pos) = inner.stream_position() else {
+        return Ok(None);
+    };
+    let end = inner.seek(SeekFrom::End(0));
+    // Restore the position whether or not the end was found; failing to do
+    // so would leave the parse at the wrong offset, so that one is an error.
+    inner
+        .seek(SeekFrom::Start(pos))
+        .map_err(|e| DekuError::Io(e.kind()))?;
+    Ok(end.ok().map(|end| end.saturating_sub(pos)))
 }
 
 /// Read `T`s until at least `bit_size` bits are consumed, then require that
@@ -181,15 +211,11 @@ where
                 }
 
                 // Otherwise, read until we have read `count` elements
-                reader_vec_with_predicate(
-                    reader,
-                    Some(bounded_capacity::<T>(count)),
-                    inner_ctx,
-                    move |_, _| {
-                        count -= 1;
-                        count == 0
-                    },
-                )
+                let capacity = bounded_capacity::<T, R>(reader, count)?;
+                reader_vec_with_predicate(reader, Some(capacity), inner_ctx, move |_, _| {
+                    count -= 1;
+                    count == 0
+                })
             }
 
             // Read until a given predicate returns true

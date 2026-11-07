@@ -146,3 +146,63 @@ fn exact_budget_still_parses() {
     assert_eq!(s.tail, 0x00);
     assert_eq!(rest.len(), 2);
 }
+
+/// Honest input larger than the fallback cap is still pre-allocated exactly,
+/// with no growth reallocations.
+#[test]
+fn honest_large_count_preallocates_exactly() {
+    #[derive(Debug, DekuRead)]
+    #[deku(endian = "big")]
+    struct S {
+        n: u32,
+        #[deku(count = "*n")]
+        items: Vec<u16>,
+    }
+    const N: u32 = 100_000; // 200 KB of elements, above the 64 KiB fallback
+    let mut input = N.to_be_bytes().to_vec();
+    input.resize(4 + 2 * N as usize, 0xAB);
+    let (_, s) = S::from_bytes((&input, 0)).unwrap();
+    assert_eq!(s.items.len(), N as usize);
+    assert_eq!(s.items.capacity(), N as usize);
+}
+
+/// A stream that can't report its end falls back to the fixed cap instead of
+/// failing or pre-allocating from the count.
+#[test]
+fn unsized_stream_falls_back_to_fixed_cap() {
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    struct NoEnd(Cursor<Vec<u8>>);
+    impl Read for NoEnd {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl Seek for NoEnd {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            match pos {
+                SeekFrom::End(_) => Err(std::io::ErrorKind::Unsupported.into()),
+                other => self.0.seek(other),
+            }
+        }
+    }
+
+    #[derive(Debug, DekuRead)]
+    #[deku(endian = "big")]
+    struct S {
+        n: u64,
+        #[deku(count = "*n")]
+        items: Vec<u32>,
+    }
+
+    // Bogus count: clean error, no capacity-overflow panic.
+    let mut bogus = NoEnd(Cursor::new(huge_count_input()));
+    assert_incomplete(S::from_reader((&mut bogus, 0)));
+
+    // Honest count still parses through the fallback path.
+    let mut honest_input = 3u64.to_be_bytes().to_vec();
+    honest_input.extend_from_slice(&[0; 12]);
+    let mut honest = NoEnd(Cursor::new(honest_input));
+    let (_, s) = S::from_reader((&mut honest, 0)).unwrap();
+    assert_eq!(s.items.len(), 3);
+}

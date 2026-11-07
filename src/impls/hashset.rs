@@ -102,9 +102,10 @@ where
                 }
 
                 // Otherwise, read until we have read `count` elements
+                let capacity = super::vec::bounded_capacity::<T, R>(reader, count)?;
                 from_reader_with_ctx_hashset_with_predicate(
                     reader,
-                    Some(super::vec::bounded_capacity::<T>(count)),
+                    Some(capacity),
                     inner_ctx,
                     move |_, _| {
                         count -= 1;
