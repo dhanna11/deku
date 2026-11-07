@@ -29,7 +29,7 @@ mod test_slice {
     }
 
     #[rstest(input_bits,
-        #[should_panic(expected = "Incomplete(NeedSize { bits: 8 })")]
+        #[should_panic(expected = "element overran size limit")]
         case(15),
 
         case(16),
@@ -112,7 +112,7 @@ mod test_vec {
     }
 
     #[rstest(input_bits,
-        #[should_panic(expected = "Incomplete(NeedSize { bits: 16 })")]
+        #[should_panic(expected = "element overran size limit")]
         case(15),
 
         case(16),

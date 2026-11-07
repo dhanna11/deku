@@ -42,6 +42,45 @@ impl DekuReader<'_, ReadExact> for Vec<u8> {
     }
 }
 
+/// Upper bound, in bytes, on speculative pre-allocation driven by a `count`
+/// read from the input. The `Vec` still grows past this if the elements are
+/// really there; a bogus count fails on the first missing element instead of
+/// requesting `count * size_of::<T>()` up front.
+const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
+fn bounded_capacity<T>(count: usize) -> usize {
+    count.min(MAX_PREALLOC_BYTES / mem::size_of::<T>().max(1))
+}
+
+/// Read `T`s until at least `bit_size` bits are consumed, then require that
+/// exactly `bit_size` were. An element that crosses the boundary is an error
+/// instead of letting the reader run on past the declared size.
+fn reader_vec_with_bit_budget<'a, T, Ctx, R: Read + Seek>(
+    reader: &mut Reader<R>,
+    bit_size: usize,
+    ctx: Ctx,
+) -> Result<Vec<T>, DekuError>
+where
+    T: DekuReader<'a, Ctx>,
+    Ctx: Copy,
+{
+    let start = reader.bits_read;
+    let res = reader_vec_with_predicate(reader, None, ctx, move |read_bits, _| {
+        read_bits >= bit_size
+    })?;
+    let read = reader.bits_read - start;
+    if read != bit_size {
+        return Err(crate::deku_error!(
+            DekuError::Parse,
+            "element overran size limit",
+            "limit {} bits, read {} bits",
+            bit_size,
+            read
+        ));
+    }
+    Ok(res)
+}
+
 /// Read `T`s into a vec until a given predicate returns true
 /// * `capacity` - an optional capacity to pre-allocate the vector with
 /// * `ctx` - The context required by `T`. It will be passed to every `T` when constructing.
@@ -131,7 +170,7 @@ where
                 }
 
                 // Otherwise, read until we have read `count` elements
-                reader_vec_with_predicate(reader, Some(count), inner_ctx, move |_, _| {
+                reader_vec_with_predicate(reader, Some(bounded_capacity::<T>(count)), inner_ctx, move |_, _| {
                     count -= 1;
                     count == 0
                 })
@@ -151,9 +190,7 @@ where
                     return Ok(Vec::new());
                 }
 
-                reader_vec_with_predicate(reader, None, inner_ctx, move |read_bits, _| {
-                    read_bits == bit_size
-                })
+                reader_vec_with_bit_budget(reader, bit_size, inner_ctx)
             }
 
             // Read until a given quantity of bytes have been read
@@ -165,9 +202,7 @@ where
                     return Ok(Vec::new());
                 }
 
-                reader_vec_with_predicate(reader, None, inner_ctx, move |read_bits, _| {
-                    read_bits == bit_size
-                })
+                reader_vec_with_bit_budget(reader, bit_size, inner_ctx)
             }
 
             Limit::End => reader_vec_to_end(reader, None, inner_ctx),
