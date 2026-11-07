@@ -1,6 +1,9 @@
 //! Untrusted counts and size limits must fail cleanly instead of
 //! pre-allocating from the input or reading past the declared size.
 #![cfg(all(feature = "std", target_pointer_width = "64"))]
+// Most structs here exist only to drive the reader into an error, so their
+// fields are never read back.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
