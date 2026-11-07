@@ -119,7 +119,7 @@ where
                 // Otherwise, read until we have read `count` elements
                 from_reader_with_ctx_hashmap_with_predicate(
                     reader,
-                    Some(count),
+                    Some(super::vec::bounded_capacity::<(K, V)>(count)),
                     inner_ctx,
                     move |_, _| {
                         count -= 1;
@@ -145,12 +145,15 @@ where
                     return Ok(HashMap::<K, V, S>::default());
                 }
 
-                from_reader_with_ctx_hashmap_with_predicate(
+                let start = reader.bits_read;
+                let res = from_reader_with_ctx_hashmap_with_predicate(
                     reader,
                     None,
                     inner_ctx,
-                    move |read_bits, _| read_bits == bit_size,
-                )
+                    move |read_bits, _| read_bits >= bit_size,
+                )?;
+                super::vec::check_bit_budget(bit_size, reader.bits_read - start)?;
+                Ok(res)
             }
 
             // Read until a given quantity of byte bits have been read
@@ -162,12 +165,15 @@ where
                     return Ok(HashMap::<K, V, S>::default());
                 }
 
-                from_reader_with_ctx_hashmap_with_predicate(
+                let start = reader.bits_read;
+                let res = from_reader_with_ctx_hashmap_with_predicate(
                     reader,
                     None,
                     inner_ctx,
-                    move |read_bits, _| read_bits == bit_size,
-                )
+                    move |read_bits, _| read_bits >= bit_size,
+                )?;
+                super::vec::check_bit_budget(bit_size, reader.bits_read - start)?;
+                Ok(res)
             }
 
             // Read until `reader.try_end()` returns `Ok(true)`

@@ -48,7 +48,7 @@ impl DekuReader<'_, ReadExact> for Vec<u8> {
 /// requesting `count * size_of::<T>()` up front.
 const MAX_PREALLOC_BYTES: usize = 64 * 1024;
 
-fn bounded_capacity<T>(count: usize) -> usize {
+pub(crate) fn bounded_capacity<T>(count: usize) -> usize {
     count.min(MAX_PREALLOC_BYTES / mem::size_of::<T>().max(1))
 }
 
@@ -64,11 +64,22 @@ where
     T: DekuReader<'a, Ctx>,
     Ctx: Copy,
 {
+    // ZSTs consume nothing; keep the existing "empty vec" behaviour (#513)
+    // rather than reporting a budget mismatch.
+    if mem::size_of::<T>() == 0 {
+        return Ok(Vec::new());
+    }
     let start = reader.bits_read;
-    let res = reader_vec_with_predicate(reader, None, ctx, move |read_bits, _| {
-        read_bits >= bit_size
-    })?;
-    let read = reader.bits_read - start;
+    let res =
+        reader_vec_with_predicate(reader, None, ctx, move |read_bits, _| read_bits >= bit_size)?;
+    check_bit_budget(bit_size, reader.bits_read - start)?;
+    Ok(res)
+}
+
+/// Shared by the size-limited container readers: `read` bits were consumed
+/// against a limit of `bit_size`. Anything other than an exact match means an
+/// element crossed the boundary.
+pub(crate) fn check_bit_budget(bit_size: usize, read: usize) -> Result<(), DekuError> {
     if read != bit_size {
         return Err(crate::deku_error!(
             DekuError::Parse,
@@ -78,7 +89,7 @@ where
             read
         ));
     }
-    Ok(res)
+    Ok(())
 }
 
 /// Read `T`s into a vec until a given predicate returns true
@@ -170,10 +181,15 @@ where
                 }
 
                 // Otherwise, read until we have read `count` elements
-                reader_vec_with_predicate(reader, Some(bounded_capacity::<T>(count)), inner_ctx, move |_, _| {
-                    count -= 1;
-                    count == 0
-                })
+                reader_vec_with_predicate(
+                    reader,
+                    Some(bounded_capacity::<T>(count)),
+                    inner_ctx,
+                    move |_, _| {
+                        count -= 1;
+                        count == 0
+                    },
+                )
             }
 
             // Read until a given predicate returns true
